@@ -18,7 +18,7 @@ Battery_level_W = np.divide(Battery_level_W, 1000)
 # collected data from each WN
 Collected_WN = np.array([0.0*i for i in range(0, W)])
 prev_states = [[[0*i for i in range(0, W)], [0.0*i for i in range(0, W)], [0.0*i for i in range(0, W)],
-                [0.0], [0.0], [0.0]] for i in range(0, U)]
+                0.0, 0.0, 0.0] for i in range(0, U)]
 BI = 4/1000
 BE = 2/1000
 
@@ -34,6 +34,9 @@ class Environment:
         self.CAw = np.array([[0.0 * i * j for i in range(0, T)] for j in range(0, W)])
         self.CW = np.array([[0.0 * i * j for i in range(0, K*T)] for j in range(0, W)])
         self.Muw = np.array([[[0.0*k*j*i for k in range(0, K)] for i in range(0, T)] for j in range(0, W)])
+        self.ZUt = np.array([[0*j*i for i in range(0, U)] for j in range(0, T)])
+        self.DUWt = np.array([[[[0*j*t*i*k for i in range(0, U)] for j in range(0, W)]for k in range(0, K)]
+                              for t in range(0,T)])
 
     def harvestEnergyFunc(self, Zu, Gu):
         Psen = -10
@@ -81,7 +84,7 @@ class Environment:
         return math.log(1+sinr, 2)*sslot_tl
 
     # energy consumed by the uav in slot t
-    def EUav(self, Vu, Duw, Zu):
+    def EUav(self, Vu, Zu, u, t):
         v = 1   #s
         Pu = 1  #W
         PI = 0.01 #W
@@ -93,11 +96,12 @@ class Environment:
         omega = 1.225
         e_1 = 0.05
         A = 0.79
+        # pruoplsion power
         P_pro = Pa*(1+3*(Vu/V_tip)**2)+0.5*f_o*omega*e_1*A*Vu**3+Pb*math.sqrt(math.sqrt(1+1/4*(Vu/e_o)**4-(Vu/e_o)**2/2))
         val = 0
         for j in range(0, W):
             for k in range(0, K):
-                val += Duw[j,k]*PI*1/K
+                val += self.DUWt[t, k, j, u]*PI*1/K
         return val + P_pro*v + Zu*Pu*v
 
     # Calculate each UAV observations from the environment
@@ -136,7 +140,24 @@ class Environment:
         prev_states = states
         return np.concatenate(states)
 
-    #   def sac_actionsPerformed(self, sac_action):
+    def sac_actionsPerformed(self, sac_action, t):
+        # add sac_action to array list
+        # self.ZUt[t] = sac_action for each U value
+        # self.Qu[j, t, 1]
+        Pw = 0.1/1000
+        Vu = 0.5
+        Guw = [[self.gain_node(self.Qw[i], self.Qu[j, t]) for j in range(0, U)] for i in range(0, W)]
+        for i in range(0, W):
+            if self.Fw[i, t] == 0:  # Enode
+                self.Bw[i, t+1] = min(4/1000, self.Bw[i, t]+self.harvestEnergyFunc(self.ZUt[t], Guw[i]))
+            else:   # Inode
+                Inode_energy =0
+                for j in range(0,U):
+                    for k in range(0,K):
+                        Inode_energy += self.DUWt[t, k, i, j]*Pw
+                self.Bw[i, t+1] = max(self.Bw[i, t]-Inode_energy, 0)
+        for i in range(0, U):
+            self.Bu[i, t+1] = max(self.Bu[i, t]-self.EUav(Vu, self.ZUt[t, i], i, t), 0)
     #   def dqn_actionsPerformed(self, dqn_action):
 
 # Actor neural network
