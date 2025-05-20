@@ -13,7 +13,7 @@ if __name__ == '__main__':
                -0.4, 0.1, 2, 4, 5, 6, 8, 9.5, 10])
     targetDat = np.array([0.0, 0.009, 0.012, 0.018, 0.02, 0.1, 0.25, 0.43, 0.48, 0.5, 0.52, 0.51,
                           0.49, 0.485, 0.48, 0.5, 0.51, 0.53, 0.55, 0.56, 0.55, 0.52, 0.513, 0.51])
-
+    print(10**((500-30)/10))
     popt, pcov = curve_fit(model_f,baseDat, targetDat, p0=[3, 2, -16, 0.3, 0.5, 0.01])
     ao, bo, co, do, eo, fo = popt
     x_model = np.linspace(min(baseDat), max(baseDat), 100)

@@ -6,6 +6,7 @@ from collections import deque
 import math
 import threading
 import random
+from torch.nn import functional as F
 
 U = 4   # number of UAV
 W = 10  # number WN nodes
@@ -14,7 +15,7 @@ K = 4   # subplot
 dcov = 20   # E-nodes’ reporting range
 BU_max = 4.5*10**5  # UAV max energy
 BU_min = 3*10**4    # UAV min energy
-EPS = 2000
+EPS = 500
 # battery energy  in range of 2-4 mW·s
 Battery_level_W = np.random.randint(2, 5, size=W)
 Battery_level_W = np.divide(Battery_level_W, 1000)
@@ -35,7 +36,8 @@ class Environment:
         self.Bu = np.array([[BU_max if i == 0 else 0.0 for i in range(0, T)] for j in range(0, U)])
         self.CAw = np.array([[0.0 * i * j for i in range(0, T)] for j in range(0, W)])
         self.CW = np.array([[0.0*t*j for t in range(0, T)] for j in range(0, W)])
-        self.Muw = np.array([[[[0.0*k*j*i*u for u in range(0,U)] for j in range(0,W)] for k in range(0,K)] for i in range(0,T)])
+        self.Muw = np.array([[[[0.0*k*j*i*u for u in range(0, U)] for j in range(0, W)] for k in range(0, K)]
+                             for i in range(0, T)])
         self.Guw = np.array([[[0*i*j*t for j in range(0, U)] for i in range(0, W)] for t in range(0,T)])
         self.ZUt = np.array([[0*j*i for i in range(0, U)] for j in range(0, T)])
         self.DUWt = np.array([[[[0*j*t*i*k for i in range(0, U)] for j in range(0, W)]for k in range(0, K)]
@@ -45,52 +47,57 @@ class Environment:
     def _energyTransfer_eff(self, p):
         Psen = -10
         Psat = 7
+        popt = [-1.33074721e+02, - 2.33336935e+01, - 1.60367485e+00, - 5.42036659e-02, - 9.00624077e-04,
+                - 5.88089624e-06]
         if p < Psen:
             eff = 0
         elif Psen <= p < Psat:
             # curve_fitting function
-            popt = [-1.33074721e+02, - 2.33336935e+01, - 1.60367485e+00, - 5.42036659e-02, - 9.00624077e-04,
-                    - 5.88089624e-06]
             eff = popt[0] + popt[1] * (p - 30) + popt[2] * (p - 30) ** 2 + popt[3] * (p - 30) ** 3 + popt[4] * (
                     p - 30) ** 4 + popt[5] * (p - 30) ** 5
         else:
-            eff = 0.557
+            eff = popt[0] + popt[1] * (7 - 30) + popt[2] * (7 - 30) ** 2 + popt[3] * (7 - 30)** 3 + popt[4]*(
+                    7- 30)**4 + popt[5] * (7 - 30) ** 5
         return eff
 
     def _harvestEnergyFunc(self, Zu, Gu):
         p = 0
+        pp = 0
         Pu = 1      #W
         for i in range(0, U):
-            p += Zu[i]*Gu[i]*Pu
-        return p*self._energyTransfer_eff(p)
+            pp += Zu[i]*Gu[i]*Pu
+            p += Zu[i]*10**((Gu[i]-30)/10)*Pu
+        return p*self._energyTransfer_eff(pp)
 
     def _gain_node(self, qw, qu):    # this function calculates the gain of each E-node
         a = 12.08
         b = 0.11
         alphaL = 3
         alphaN = 5
-        G_o = -3    #-3dBm
+        G_o = 0.5  # 0.4 dBm
         h = 5   #m
 
         duw = math.sqrt((qw[0]-qu[0])**2+(qw[1]-qu[1])**2)
+        beta = 0
         if (h / duw) <= 1:
             beta = math.asin(h / duw)
-        beta = 0
         Plos = (1+a*math.exp(-b*(beta-a)))**-1
         Pnlos = 1 - Plos
-
-        return (Plos*G_o*duw)**-alphaL + (Pnlos*G_o*duw)**-alphaN
+        val = (Plos*G_o*duw)**-alphaL + (Pnlos*G_o*duw)**-alphaN
+        if val > 20:
+            val = random.randint(10, 20)
+        return val
 
     # transmission data size bits/Hz at sub slot k
-    def _M_Inode(self, Dact, w, D, Gwu, Fw):
+    def _M_Inode(self, Dact, w, D, Gwu, ti):
         Pw = 0.1/1000
-        sigma2 = -90    #dBm
+        sigma2 = 10**((-90-30)/10) #watts
         sslot_tl = 1/K
         numerator = Dact*Pw*Gwu[w]
         denomenator = 0
         for i in range(0, U):
             for j in range(0, W):
-                if j != w and Fw[j] == 1:
+                if j != w and self.Fw[j, ti] == 1:
                     denomenator += (D[j, i]*Pw*Gwu[j]+sigma2)
         c = 0
         if denomenator != 0:
@@ -126,18 +133,18 @@ class Environment:
         if t > 0:
             self.Hw[t] = np.array([0 if self.Fw[w, t] == 1 else self.Hw[t - 1, w] + 1 if
             self._harvestEnergyFunc(self.ZUt[t - 1], self.Guw[t - 1, w]) < Exp else max(self.Hw[t - 1, w] - 1, 1) for w
-                                   in range(0,W)])
+                                   in range(W)])
         else:
-            self.Hw[t] = np.array([0 if self.Fw[w, t] == 1 else 1 for w in range(0,W)])
+            self.Hw[t] = np.array([0 if self.Fw[w, t] == 1 else 1 for w in range(0, W)])
         # a weight for charging all e-nodes by a uav
-        Nu = np.array([0*u for u in range(0,U)])
-        Fac = np.array([0 * u for u in range(0,U)])
+        Nu = np.array([0*u for u in range(0, U)])
+        Fac = np.array([0 * u for u in range(0, U)])
         Pu = 1  # W
         # reward  Denote UAV-u’s reward on WET to all the E-nodes in slot t given as
-        Bu_Wet = [0*u for u in range(0,U)]
+        Bu_Wet = [0*u for u in range(0, U)]
         for i in range(0, U):
             for j in range(0, W):
-                if self.Fw[j, t] == 0:
+                if self.Fw[j, t] == 0 and t+1 < T:
                     p = self.ZUt[t, i] * self.Guw[t, j, i] * Pu
                     if self.Bw[j, t+1]-self.Bw[j, t] != 0:
                         Nu[i] += (self._energyTransfer_eff(p)*p)/(self.Bw[j, t+1]-self.Bw[j, t])
@@ -145,33 +152,36 @@ class Environment:
             Bu_Wet[i] = Nu[i]*Fac[i]*20
         # reward on WDC decision from inodes
         Cmin = 100  # bits/Hz at time slot t
-        Bu_Wdc = [np.sum(np.array([self.CAw[i, t] - t/T*Cmin for i in range(0,W)]))*0.01 for u in range(0,U)]
+        Bu_Wdc = [np.sum(np.array([self.CAw[i, t] - t/T*Cmin for i in range(0, W)]))*0.01 for u in range(0, U)]
         # reward on UAV battery energy saving
-        Bu_Es = [(self.Bu[u, t+1]-BU_min)**(10**-6) for u in range(0,U)]
+        n = t + 1
+        if t + 1 == T:
+            n = t
+        Bu_Es = [(self.Bu[u, n]-BU_min)*(10**-6) for u in range(0, U)]
         # reward on UAV distance safe distance
-        dmin = 2 #m
-        Bu_Sd = [0*u for u in range(0,U)]
+        dmin = 2    #m
+        Bu_Sd = [0*u for u in range(0, U)]
         rewards = []
-        for u in range(0,U):
-            for j in range(0,U):
+        for u in range(U):
+            for j in range(U):
                 if j != u:
                     dist = np.linalg.norm(self.Qu[j, t] - self.Qu[u, t])
-                    if dist<dmin:
+                    if dist < dmin:
                         Bu_Sd[u] = -1
                         break
-            rewards.append(Bu_Wet[u] + Bu_Wdc[u] + Bu_Es[u] + Bu_Sd[u])
+            rewards.append([Bu_Wet[u] + Bu_Wdc[u] + Bu_Es[u] + Bu_Sd[u]])
         return rewards
 
     def rewards_DQNAction(self, t, k):
         Cmin = 100  # bits/Hz at time slot t
-        return [np.sum(np.array([self.Muw[t, k, i, u] for i in range(0,W)]))
-                        + np.sum(np.array([self.CAw[i, t] - (t-1)/T*Cmin for i in range(0,W)])) for u in range(0,U)]
+        return [np.sum(np.array([self.Muw[t, k, i, u] for i in range(W)]))
+                        + np.sum(np.array([self.CAw[i, t] - (t-1)/T*Cmin for i in range(W)])) for u in range(U)]
 
     # Calculate each UAV observations from the environment
     def sac_observations(self, t):
         global prev_states
         # define Node parameters
-        for i in range(0, W):
+        for i in range(W):
             # Battery level of each Node and its type
             if t == 0:
                 self.Bw[i, 0] = Battery_level_W[i]
@@ -185,11 +195,11 @@ class Environment:
             # data transmitted by each Node is updated after dqn
         # UAV observations
         states = []
-        for j in range(0, U):
-            fw = [self.Fw[i, t] for i in range(0, W)]
+        for j in range(U):
+            fw = [self.Fw[i, t] for i in range(W)]
             bw = []
             caw = []
-            for i in range(0, W):
+            for i in range(W):
                 drep = math.sqrt((self.Qu[j, t, 0] - self.Qw[i, 0]) ** 2 + (self.Qu[j, t, 1] - self.Qw[i, 1]) ** 2)
                 if drep <= dcov or self.Fw[i, t] == 1:
                     bw.append(self.Bw[i, t])
@@ -214,51 +224,63 @@ class Environment:
         Vu = [t.item() for t in sac_action[1]]
         ang = [t.item() for t in sac_action[0]]
         Zu = [1 if t.item() > 0 else 0 for t in sac_action[2]]
-        for u in range(0, U):
-            self.Qu[u, t+1, 0] = self.Qu[u, t, 0] + Vu[u]*math.cos(ang[u])
-            self.Qu[u, t+1, 1] = self.Qu[u, t, 1] + Vu[u]*math.sin(ang[u])
-            self.ZUt[t, u] = Zu[u]
-        Pw = 0.1/1000
-        # update battery levels of UAV and Wireless Nodes
-        self.Guw[t] = np.array([[self._gain_node(self.Qw[i], self.Qu[j, t]) for j in range(0, U)] for i in range(0, W)])
-        for i in range(0, W):
-            if self.Fw[i, t] == 0:  # Enode
-                self.Bw[i, t+1] = min(4/1000, self.Bw[i, t]+self._harvestEnergyFunc(self.ZUt[t], self.Guw[t,i]))
-            else:   # Inode
-                Inode_energy =0
-                for j in range(0, U):
-                    for k in range(0, K):
-                        Inode_energy += self.DUWt[t, k, i, j]*Pw
-                self.Bw[i, t+1] = max(self.Bw[i, t]-Inode_energy, 0)
-        for i in range(0,U):   # UAV
-            self.Bu[i, t+1] = max(self.Bu[i, t]-self._EUav(Vu[i], self.ZUt[t, i], i, t), 0)
-        # rewards obtained by this actions
+
+        if t+1 < T:
+            for u in range(0, U):
+                self.Qu[u, t+1, 0] = self.Qu[u, t, 0] + Vu[u]*math.cos(ang[u])
+                self.Qu[u, t+1, 1] = self.Qu[u, t, 1] + Vu[u]*math.sin(ang[u])
+                self.ZUt[t, u] = Zu[u]
+            Pw = 0.1/1000
+            # update battery levels of UAV and Wireless Nodes
+
+            for i in range(W):
+                for j in range(U):
+                    val = self._gain_node(self.Qw[i], self.Qu[j, t])
+                    self.Guw[t, i, j] = val
+
+            for i in range(0, W):
+                if self.Fw[i, t] == 0:  # Enode
+                    val = self.Bw[i, t] + self._harvestEnergyFunc(self.ZUt[t], self.Guw[t, i])
+                    if np.isnan(val):
+                        val = 4/1000
+                    self.Bw[i, t+1] = min(4/1000, val)
+                else:   # Inode
+                    Inode_energy = 0
+                    for j in range(0, U):
+                        for k in range(0, K):
+                            Inode_energy += self.DUWt[t, k, i, j]*Pw
+                    self.Bw[i, t+1] = max(self.Bw[i, t]-Inode_energy, 0)
+            for i in range(U):   # UAV
+                val = self.Bu[i, t]-self._EUav(Vu[i], self.ZUt[t, i], i, t)
+                if np.isnan(val):
+                    val = 0
+                self.Bu[i, t+1] = max(val, 0)
 
     def dqn_Observations(self, p, t):
-        for i in range(0,W):
-            for j in range(0,U):
-                for k in range(0,K):
-                    self.CW[i, t] += self.Muw[t, k, i, j]
-            for ts in range(0,t):
-                self.CAw[i, ts] += self.CW[i, ts]
         states = []
         for j in range(0,U):
             state = [self.Qu[j, t, 0], self.Qu[j, t, 1]] + [self.CAw[i, t] for i in range(0, W)] + [p]
             states.append(state)
         return states
 
-    def dqn_actionsPerformed(self, k, t, actions):
-        Wca = [w for w in range(0, W)]
-        for u in range(0,U):
+    def dqn_actionsPerformed(self, k, t, actions, Wca):
+        for u in range(U):
             Dact = 0
             maxw = torch.argmax(actions[u]).item()
             if self.Fw[maxw, t] == 1 and Wca[maxw] != -1:
                 Dact = 1
-            Wca[maxw] = -1
             self.DUWt[t, k, maxw, u] = Dact
             Duw = self.DUWt[t, k]
-            GUw = [self.Guw[t, i, u] for i in range(0,W)]
-            self.Muw[t, k, maxw, u] = self._M_Inode(Dact, maxw, Duw, GUw, self.Fw[t])
+            GUw = [self.Guw[t, i, u] for i in range(0, W)]
+            muw = self._M_Inode(Dact, maxw, Duw, GUw, t)
+            self.Muw[t, k, maxw, u] = muw
+
+        for i in range(W):
+            for j in range(U):
+                for ki in range(K):
+                    self.CW[i, t] += self.Muw[t, ki, i, j]
+            for ts in range(0, t):
+                self.CAw[i, ts] += self.CW[i, ts]
 
 
 # === Replay Buffer ===
@@ -271,7 +293,7 @@ class ReplayBuffer:
 
     def sample(self):
         batch_size = min(128, len(self.buffer))
-        return random.sample(self.buffer, batch_size)
+        return random.sample(self.buffer, 1)
 
 
 # Actor neural network
@@ -291,11 +313,10 @@ class Actor(nn.Module):
         x = torch.relu(self.fc2(x))
         x = torch.relu(self.fc3(x))
         x = torch.relu(self.fc4(x))
-        out = self.tanh(torch.relu(self.fc5(x)))
-
-        xang = [out[u][0]*math.pi/2 for u in range(U)]
-        Vu = [out[u][1]*150 for u in range(U)]
-        Zu = [out[u][2] for u in range(U)]
+        out = self.fc5(x)
+        xang = [self.tanh(out[u][0]) for u in range(U)]
+        Vu = [self.tanh(out[u][1]) for u in range(U)]
+        Zu = [self.tanh(out[u][2]) for u in range(U)]
         return xang, Vu, Zu
 
 
@@ -314,7 +335,7 @@ class V_Critic(nn.Module):
         x = torch.relu(self.fc2(x))
         x = torch.relu(self.fc3(x))
         x = torch.relu(self.fc4(x))
-        out = torch.relu(self.fc5(x))
+        out = self.fc5(x)
         return out
 
 
@@ -333,7 +354,7 @@ class Q_Critic(nn.Module):
         x = torch.relu(self.fc2(x))
         x = torch.relu(self.fc3(x))
         x = torch.relu(self.fc4(x))
-        return torch.relu(self.fc5(x))
+        return self.fc5(x)
 
 
 # DQN policy neural network
@@ -348,10 +369,11 @@ class E_DQN(nn.Module):
 
     def forward(self, obsver):
         x = torch.relu(self.fc1(obsver))
-        x = torch.relu(self.fc2(x))
-        x = torch.relu(self.fc3(x))
-        x = torch.relu(self.fc4(x))
-        return torch.relu(self.fc5(x))
+        x2 = torch.relu(self.fc2(x))
+        x3 = torch.relu(self.fc3(x2))
+        x4 = torch.relu(self.fc4(x3))
+        out = torch.relu(self.fc5(x4))
+        return out
 
 
 # Define the V and Q critic losses for central training of SAC policy
@@ -367,10 +389,8 @@ class SAC_Losses:
         mean = torch.mean(self.actions)
         log_std = torch.log(torch.std(self.actions))
         dist = torch.distributions.Normal(mean, log_std)
-        entropy = torch.mul(dist.entropy(), alphaU)
-        mn = torch.mean(self.actions)
-        vl = Qmin-entropy
-        p1 = 0.5*(Vc1_out-torch.mul(mn, vl))**2
+        target = torch.mean(self.actions)*(Qmin-dist.entropy()*alphaU)
+        p1 = 0.5*(Vc1_out-target)**2
         return torch.mean(p1)
 
     def Qc_Loss(self, gamma, Qc, Vc2_out):
@@ -386,11 +406,10 @@ class SAC_Losses:
         mean = torch.mean(noisy_action)
         log_std = torch.log(torch.std(noisy_action))
         dist = torch.distributions.Normal(mean, log_std)
-        vg = (alphaU*dist.entropy() - QminNoisy)
-        return torch.mean(vg)
+        return torch.mean(dist.entropy()*alphaU-QminNoisy)
 
     def AlphaU_loss(self, alphaU, Hbar):
-        return torch.mean(torch.mean(self.actions)*(-alphaU*self.actions-alphaU*Hbar))
+        return torch.mean(self.actions)*(-alphaU*torch.log10(torch.mean(self.actions))-alphaU*Hbar)
 
 
 # Define the SAC agent class completely
@@ -398,19 +417,42 @@ class SAC_Agent:
     def __init__(self, lr=0.0003, gamma=0.99, tau=0.999, alpha=0.0002):
         self.gamma = gamma
         self.tau = tau
-        self.alphaU = alpha
         self.Actor = Actor()
         self.V_critic1 = V_Critic()
         self.V_critic2 = V_Critic()
         self.Q_critic1 = Q_Critic()
         self.Q_critic2 = Q_Critic()
 
+        self.path = "src/models/"
+
         self.actor_optimizer = optim.Adam(self.Actor.parameters(), lr=lr)
         self.Vcritic1_optimizer = optim.Adam(self.V_critic1.parameters(), lr=lr)
         self.Qcritic1_optimizer = optim.Adam(self.Q_critic1.parameters(), lr=lr)
         self.Qcritic2_optimizer = optim.Adam(self.Q_critic2.parameters(), lr=lr)
-        self.log_alpha = torch.tensor(np.log(alpha), requires_grad=True)
-        self.alphaU_optimizer = optim.Adam([self.log_alpha], lr=lr)
+        self.alpha = torch.tensor(alpha, requires_grad=True)
+        self.alphaU_optimizer = optim.Adam([self.alpha], lr=lr)
+
+    def saveData(self):
+        torch.save({
+            'Actor_state_dict': self.Actor.state_dict(),
+            'V1_state_dict': self.V_critic1.state_dict(),
+            'V2_state_dict': self.V_critic2.state_dict(),
+            'Q1_state_dict': self.Q_critic1.state_dict(),
+            'Q2_state_dict': self.Q_critic2.state_dict()
+        }, self.path+"model.pt")
+
+    def loadData(self):
+        checkpoint = torch.load(self.path+"model.pt")
+        self.Actor.load_state_dict(checkpoint['Actor_state_dict'])
+        self.Actor.eval()
+        self.V_critic1.load_state_dict(checkpoint['V1_state_dict'])
+        self.V_critic1.eval()
+        self.V_critic2.load_state_dict(checkpoint['V2_state_dict'])
+        self.V_critic2.eval()
+        self.Q_critic1.load_state_dict(checkpoint['Q1_state_dict'])
+        self.Q_critic1.eval()
+        self.Q_critic2.load_state_dict(checkpoint['Q2_state_dict'])
+        self.Q_critic2.eval()
 
     def getSacAction(self, Observation_U):
         return self.Actor(Observation_U)
@@ -422,33 +464,38 @@ class SAC_Agent:
 
         states = torch.stack(states)
         actions = torch.tensor(action_z, dtype=torch.float32)
-        rewards = torch.tensor(rewards, dtype=torch.float32)
+        rewards = torch.tensor(rewards[0], dtype=torch.float32)
         next_states = torch.stack(next_states)
         noise = torch.normal(mean=0.0, std=0.1, size=actions.shape)  # ε ∼ 𝒩(0, σ²)
         noisy_action = actions + noise
 
-        states = states.repeat(len(actions), 1)
-        next_states = next_states.repeat(len(actions), 1)
+        states = states.reshape(states.size()[1], states.size()[2])
+
+        #states = F.normalize(states, dim=1)
+        #actions = F.normalize(actions, dim=1)
+        #rewards = F.normalize(rewards, dim=1)
+        #next_states = F.normalize(next_states, dim=1)
 
         loss_func = SAC_Losses(states, actions, rewards, next_states)
 
         vc1 = self.V_critic1(states)
-        vc2 = self.V_critic2(next_states)
+
         qu1 = self.Q_critic1(states, actions)
         qu2 = self.Q_critic2(states, actions)
         qmin1 = torch.min(qu1, qu2)
 
         self.Vcritic1_optimizer.zero_grad()
-        lossVc1 = loss_func.Vc1_Loss(self.alphaU, qmin1, vc1)
+        lossVc1 = loss_func.Vc1_Loss(self.alpha, qmin1, vc1)
         lossVc1.backward()
         self.Vcritic1_optimizer.step()
 
         # soft update Vcritic 2 parameters
-        for target_param, param in zip(self.V_critic2.parameters(), self.V_critic1.parameters()):
-            target_param.data = self.tau * target_param.data + (1 - self.tau) * param
+        with torch.no_grad():
+            for target_param, param in zip(self.V_critic2.parameters(), self.V_critic1.parameters()):
+                target_param.data = self.tau * target_param.data + (1 - self.tau) * param
 
+        # update q critic network load new q1 and q2 tensors for back propagation
         qu1 = self.Q_critic1(states, actions)
-
         vc2 = self.V_critic2(next_states)
 
         self.Qcritic1_optimizer.zero_grad()
@@ -464,25 +511,19 @@ class SAC_Agent:
         lossQc2.backward()
         self.Qcritic2_optimizer.step()
 
+        # add noise to avoid over fitting and update weights for the actor network
         qu1N = self.Q_critic1(states, noisy_action)
         qu2N = self.Q_critic2(states, noisy_action)
         qminNois = torch.min(qu1N, qu2N)
 
         self.actor_optimizer.zero_grad()
-        lossAct = loss_func.Act_loss(self.alphaU, qminNois)
+        lossAct = loss_func.Act_loss(self.alpha, qminNois)
         lossAct.backward()
         self.actor_optimizer.step()
 
-
-
         self.alphaU_optimizer.zero_grad()
-        lossAU = loss_func.AlphaU_loss(self.log_alpha, 2)
-        print(lossAU)
+        lossAU = loss_func.AlphaU_loss(self.alpha, 2)
         lossAU.backward()
-        self.alphaU_optimizer.step()
-
-        self.alphaU = self.log_alpha.exp()
-        print(self.alphaU)
 
 
 # Define the DQN at UAV-u and train it locally.
@@ -505,32 +546,45 @@ class DQN_Agent:
         return self.Q_1(ObservationU)
 
     def soft_update_target(self, epi, tau=0.999):
-        if random.randint(1, 200)/100 < max(self.erE, self.erS - (self.erS - self.erE) * epi / EPS):
-            for target_param, local_param in zip(self.Q_T.parameters(), self.Q_1.parameters()):
-                target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
+        with torch.no_grad():
+            if random.randint(1, 200)/100 < max(self.erE, self.erS - (self.erS - self.erE) * epi / EPS):
+                for target_param, local_param in zip(self.Q_T.parameters(), self.Q_1.parameters()):
+                    target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
 
     def update(self, mini_batch, epi):
         observs_z, actions_z, rewards_z, next_observs_z = zip(*mini_batch)
         # print(type(next_observs_z[0]))
-        observs = torch.stack(observs_z)  # shape: (batch_size, obs_dim)
-        actions = torch.stack(actions_z)
-        rewards = torch.stack(rewards_z)
-        next_observs = torch.stack(next_observs_z)
+        observs = observs_z[0]  # shape: (batch_size, obs_dim)
+        actions = actions_z[0]
+        rewards = rewards_z[0]
+        next_observs = next_observs_z[0]
+
+        # match new actions to old
+        acts_new = self.get_actions(observs)
+        are_equal = torch.eq(actions, acts_new)
+        # Count how many elements differ
+        num_different = torch.sum(~are_equal).item()
+
+        if num_different == 0:
+            pass
+
+        acts_new = F.normalize(acts_new, dim=0)
+        rewards = F.normalize(rewards, dim=0)
 
         with torch.no_grad():
             next_acts = self.Q_T(next_observs)
-            max_next_acts = next_acts.max(1, keepdim=True)[0]
-
-        target = rewards + self.gamma * max_next_acts
-
-        loss = torch.mean(0.5 * (actions.max(1, keepdim=True)[0] - target).pow(2))
+            next_new = F.normalize(next_acts, dim=0)
+            max_next_acts = torch.max(next_new)
 
         self.Q_1_optimizer.zero_grad()
+        p1 = torch.mul(self.gamma, max_next_acts)
+        target = torch.add(p1, rewards)
+        maxt = torch.max(acts_new)
+        crit = nn.MSELoss()
+        loss = crit(maxt, target)
+        # print(maxt, loss)
+        torch.autograd.set_detect_anomaly(True)
         loss.backward()
-
-        for param in self.Q_1.parameters():
-            if param.grad is not None:
-                param.grad.data.clamp_(-1, 1)
 
         self.Q_1_optimizer.step()
         self.soft_update_target(epi)
@@ -553,73 +607,65 @@ def run_uav_agents_async(uavs, Od_Uk):
     return actions_results
 
 
-def update_uav_agents_async(uavs, epi):
-
-    def worker(agent):
-        try:
-            batch = agent.buffer.sample()
-            agent.update(batch, epi)
-        except Exception as e:
-            print(f"[Error] Updating agent failed: {e}")
-
-    threads = []
-
-    for agent in uavs:
-        thread = threading.Thread(target=worker, args=(agent,))
-        thread.start()
-        threads.append(thread)
-
-    for thread in threads:
-        thread.join()
-
-
 def Trainer():
-    Ctotal = [0*j for j in range(EPS)]
+    Ctotal = np.array([0*j for j in range(EPS)])
     Sac = SAC_Agent()
-    uavs = [DQN_Agent() for i in range(U)]
+    Sac.loadData()
+    uavs = [DQN_Agent() for _ in range(U)]
     buffer_sac = ReplayBuffer()
-    for i in range(1):
+    for i in range(EPS):
         # Initialize the locations and battery levels of all UAVs and WNs;
         Env = Environment()
         # Initialize all te observations
         Os_Ut = torch.tensor(Env.sac_observations(0), dtype=torch.float32)
         states = torch.flatten(Os_Ut)
+        states = states.repeat(U, 1)
         Od_Uk = [torch.tensor(Env.dqn_Observations(k, 0), dtype=torch.float32) for k in range(K)]
-        for t in range(T):
+        for t in range(T-1):
             # actions performed and reward obtained
             As_Ut = Sac.getSacAction(Os_Ut)
             Env.sac_actionsPerformed(As_Ut, t)
             reward_sac = Env.rewards_SACAction(t)
             acts = []
             reward_dqn = []
+            Wca = [w for w in range(W)]
             for k in range(K):
                 # actions at k
                 acts.append(run_uav_agents_async(uavs, Od_Uk[k]))
-                Env.dqn_actionsPerformed(k, t, acts[k])
+                Env.dqn_actionsPerformed(k, t, acts[k], Wca)
                 reward_dqn.append(Env.rewards_DQNAction(t, k))
             # next states and experience
-            Next_Os_Ut = torch.tensor(Env.sac_observations(t + 1), dtype=torch.float32)
-            nxt_states = torch.flatten(Next_Os_Ut)
+            next_Os_Ut = torch.tensor(Env.sac_observations(t + 1), dtype=torch.float32)
+            nxt_states = torch.flatten(next_Os_Ut)
+            nxt_states = nxt_states.repeat(U, 1)
 
             experience = (states, As_Ut, reward_sac, nxt_states)
             buffer_sac.add(experience)
-            Next_Od_Uk = []
+            next_Od_Uk = []
             for k in range(K):
                 # next observations and experience
-                Next_Od_Uk.append(torch.tensor(Env.dqn_Observations(k, t+1), dtype=torch.float32))
+                next_Od_Uk.append(torch.tensor(Env.dqn_Observations(k, t+1), dtype=torch.float32))
                 for ui in range(U):
-                    experi = (Od_Uk[k][ui], acts[k][ui], torch.tensor(reward_dqn[k][ui], dtype=torch.float32), Next_Od_Uk[k][ui])
+                    experi = (Od_Uk[k][ui], acts[k][ui], torch.tensor(reward_dqn[k][ui], dtype=torch.float32), next_Od_Uk[k][ui])
                     uavs[ui].buffer.add(experi)
-
+            # print(len(buffer_sac.buffer))
+            # print(reward_sac)
             # update dqn network
-            update_uav_agents_async(uavs, i)
+            for agent in uavs:
+                batch = agent.buffer.sample()
+                agent.update(batch, i)
+
             # update sac network
             Sac.update(buffer_sac.sample())
-            Od_Uk = Next_Od_Uk
-            Os_Ut = Next_Os_Ut
+            Od_Uk = next_Od_Uk
+            Os_Ut = next_Os_Ut
 
+        print(np.sum(Env.Muw))
+        Ctotal[i] = np.sum(Env.CW)
+        print(Ctotal[i])
         for agent in uavs:
             agent.sched_learn.step()
+    Sac.saveData()
 
 
 # finish training models
