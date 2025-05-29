@@ -414,14 +414,14 @@ class SAC_Losses:
 
 # Define the SAC agent class completely
 class SAC_Agent:
-    def __init__(self, lr=0.0003, gamma=0.99, tau=0.999, alpha=0.0002):
+    def __init__(self, device, lr=0.0003, gamma=0.99, tau=0.999, alpha=0.0002):
         self.gamma = gamma
         self.tau = tau
-        self.Actor = Actor()
-        self.V_critic1 = V_Critic()
-        self.V_critic2 = V_Critic()
-        self.Q_critic1 = Q_Critic()
-        self.Q_critic2 = Q_Critic()
+        self.Actor = Actor().to(device)
+        self.V_critic1 = V_Critic().to(device)
+        self.V_critic2 = V_Critic().to(device)
+        self.Q_critic1 = Q_Critic().to(device)
+        self.Q_critic2 = Q_Critic().to(device)
 
         self.path = "src/models/"
 
@@ -528,14 +528,14 @@ class SAC_Agent:
 
 # Define the DQN at UAV-u and train it locally.
 class DQN_Agent:
-    def __init__(self, gamma=0.99):
+    def __init__(self, device, gamma=0.99):
         self.lr_start = 0.01
         self.lr_end = 0.000001
         self.erS = 0.9
         self.erE = 0.02
         self.gamma = gamma
-        self.Q_1 = E_DQN()
-        self.Q_T = E_DQN()
+        self.Q_1 = E_DQN().to(device)
+        self.Q_T = E_DQN().to(device)
         self.buffer = ReplayBuffer()
 
         self.Q_1_optimizer = optim.Adam(self.Q_1.parameters(), lr=self.lr_start)
@@ -609,9 +609,10 @@ def run_uav_agents_async(uavs, Od_Uk):
 
 def Trainer():
     Ctotal = np.array([0*j for j in range(EPS)])
-    Sac = SAC_Agent()
+    DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    Sac = SAC_Agent(DEVICE)
     Sac.loadData()
-    uavs = [DQN_Agent() for _ in range(U)]
+    uavs = [DQN_Agent(DEVICE) for _ in range(U)]
     buffer_sac = ReplayBuffer()
     for i in range(EPS):
         # Initialize the locations and battery levels of all UAVs and WNs;
